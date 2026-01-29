@@ -5,7 +5,7 @@ This project demonstrates a secure, cloud-native analytics platform designed for
 [cite_start]Originally deployed on a **Google Cloud VM** using **Nginx**, **Gunicorn**, and **Flask**, this repository now serves as a technical showcase of the system's architecture and privacy-preserving capabilities[cite: 55, 65, 133].
 
 ## 📂 Project Documentation
-[cite_start]For a comprehensive breakdown of the architecture, privacy trade-offs, and deployment configuration, please refer to the [Full Technical Report](./Report.pdf)[cite: 3].
+[cite_start]For a comprehensive breakdown of the architecture, privacy trade-offs, and deployment configuration, please refer to the full report pdf.
 
 ---
 
