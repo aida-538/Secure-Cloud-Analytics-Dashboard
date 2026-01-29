@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure Cloud Dashboard</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+  .barcell{position:relative}
+  .barbg{position:absolute;left:0;top:50%;transform:translateY(-50%);height:8px;background:rgba(54,162,235,.35);border-radius:4px}
+  .bartext{position:relative}
+</style>
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <h2 class="text-center mb-3">Secure Cloud Analytics</h2>
+  <div id="msg" class="alert alert-info">Login below</div>
+
+  <div id="login">
+    <input id="email" class="form-control mb-2" placeholder="Email">
+    <input id="pw" class="form-control mb-2" placeholder="Password" type="password">
+    <button id="btn" class="btn btn-primary w-100">Login</button>
+  </div>
+
+  <div id="dash" style="display:none;">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+      <div><b id="who"></b></div>
+      <div class="d-flex align-items-center gap-3">
+        <div id="dpBox"><label>DP <input type="checkbox" id="dp"></label></div>
+      </div>
+    </div>
+
+    <ul class="nav nav-tabs" id="tabs"></ul>
+    <div class="tab-content mt-3" id="content"></div>
+  </div>
+</div>
+
+<script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+<script>
+let token="", role="", dp=false;
+const charts={};
+
+const tabs={
+  top:"Top Products",
+  trend:"Discount vs Profit",
+  anomalies:"Anomaly Overview",
+  logs:"Audit Log"
+};
+
+function makeChart(id,type,data,opts){
+  const ctx=document.getElementById(id).getContext("2d");
+  if(charts[id]) charts[id].destroy();
+  charts[id]=new Chart(ctx,{type,data,options:Object.assign({responsive:true},opts||{})});
+}
+
+function numberFmt(x,kind){
+  if(kind==="pct") return (x||0).toFixed(1)+"%";
+  if(kind==="money"){ const v=Math.round(x||0); return v.toLocaleString(); }
+  return (x||0).toLocaleString();
+}
+
+function populateMeta(cb){
+  $.ajax({
+    url:"/analytics?type=meta",
+    headers:{Authorization:"Bearer "+token},
+    success:r=>cb(r.rows)
+  });
+}
+
+function loadTop(){
+  $("#content").html(`
+    <div class="row g-2 mb-2">
+      <div class="col-auto">
+        <select id="tp_gdim" class="form-select form-select-sm">
+          <option value="region">Group by Market & Region</option>
+          <option value="category">Group by Category</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <select id="tp_n" class="form-select form-select-sm">
+          <option value="5">Top 5</option>
+          <option value="10" selected>Top 10</option>
+          <option value="20">Top 20</option>
+        </select>
+      </div>
+      <div class="col-auto">
+        <select id="tp_scope" class="form-select form-select-sm"><option value="">All</option></select>
+      </div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle">
+        <thead><tr><th>#</th><th>Product</th><th>Group</th><th>Orders</th><th class="w-50">Profit</th></tr></thead>
+        <tbody id="tp_body"></tbody>
+      </table>
+    </div>
+  `);
+
+  function refreshScopeOptions(meta){
+    const gdim=$("#tp_gdim").val();
+    const list = (gdim==="region") ? meta.categories : meta.regions;
+    $("#tp_scope").html(`<option value="">All</option>`+list.map(x=>`<option>${x}</option>`).join(""));
+  }
+
+  populateMeta(m=>{ refreshScopeOptions(m); fetch(); });
+
+  $("#tp_gdim,#tp_n,#tp_scope").off().change(fetch);
+
+  function fetch(){
+    const gdim=$("#tp_gdim").val(), n=$("#tp_n").val(), sval=$("#tp_scope").val();
+    $.ajax({
+      url:`/analytics?type=top&gdim=${gdim}&metric=profit&n=${n}&sval=${encodeURIComponent(sval)}&dp=${dp}`,
+      headers:{Authorization:"Bearer "+token},
+      success:r=>{
+        const rows=r.rows||[];
+        const maxVal=Math.max(1, ...rows.map(x=>Math.abs(x.metric)||0));
+        const body=rows.map((x,i)=>{
+          const w=Math.round((Math.abs(x.metric)/maxVal)*100);
+          const label = numberFmt(x.metric,"money");
+          return `<tr>
+            <td>${i+1}</td>
+            <td>${x.product}</td>
+            <td>${x.g}</td>
+            <td>${numberFmt(x.orders)}</td>
+            <td class="barcell">
+              <div class="barbg" style="width:${w}%"></div>
+              <div class="bartext">${label}</div>
+            </td>
+          </tr>`;
+        }).join("");
+        $("#tp_body").html(body);
+      },
+      error:_=>$("#tp_body").html("<tr><td colspan='5' class='text-danger'>Failed to load.</td></tr>")
+    });
+  }
+}
+
+function loadTrend(){
+  $("#content").html(`
+    <div class="row g-2 mb-2">
+      <div class="col-auto">
+        <select id="tr_gdim" class="form-select form-select-sm">
+          <option value="region">Group by Market & Region</option>
+          <option value="category">Group by Category</option>
+        </select>
+      </div>
+    </div>
+    <div id="tr_buttons" class="mb-2"></div>
+    <small class="text-muted d-block mb-2">Click on any region or category button to toggle its line on the chart. You can compare one or many at the same time.</small>
+    <canvas id="tr_canvas" height="180"></canvas>
+  `);
+
+  let trendData = null;
+  let activeSet = new Set();
+
+  $("#tr_gdim").off().change(fetchTrend);
+
+  fetchTrend();
+
+  function fetchTrend(){
+    const gdim=$("#tr_gdim").val();
+    $.ajax({
+      url:`/analytics?type=trend&gdim=${gdim}&dp=${dp}`,
+      headers:{Authorization:"Bearer "+token},
+      success:r=>{
+        trendData = r;
+        const series = r.series || [];
+        const container = $("#tr_buttons");
+        if (!series.length){
+          container.html("<em>No data</em>");
+          makeChart("tr_canvas","line",{labels:[],datasets:[]},{});
+          return;
+        }
+        activeSet = new Set();
+        const btns = series.map((s,i)=>`<button type="button" class="btn btn-sm btn-outline-primary me-1 mb-1 tr-btn" data-idx="${i}">${s.g}</button>`).join("");
+        container.html(btns);
+        // default: activate first line
+        activeSet.add(0);
+        container.find(".tr-btn[data-idx='0']").addClass("active");
+        container.off("click",".tr-btn").on("click",".tr-btn",function(){
+          const idx = parseInt($(this).data("idx"),10);
+          if ($(this).hasClass("active")){
+            $(this).removeClass("active");
+            activeSet.delete(idx);
+          } else {
+            $(this).addClass("active");
+            activeSet.add(idx);
+          }
+          renderTrend();
+        });
+        renderTrend();
+      },
+      error:_=>{}
+    });
+  }
+
+  function renderTrend(){
+    if (!trendData) return;
+    const bands = trendData.bands || [];
+    const series = trendData.series || [];
+
+    if (activeSet.size === 0){
+      makeChart("tr_canvas","line",{labels:bands,datasets:[]},
+        {interaction:{mode:"index",intersect:false}});
+      return;
+    }
+
+    const datasets = Array.from(activeSet).map(i=>{
+      const s = series[i];
+      if (!s) return null;
+      return {
+        label: s.g,
+        data: s.values
+      };
+    }).filter(Boolean);
+
+    makeChart("tr_canvas","line",{labels:bands,datasets:datasets},
+      {interaction:{mode:"index",intersect:false}});
+  }
+}
+
+function loadAnomalies(){
+  $("#content").html(`
+    <div class="row g-2 mb-2">
+      <div class="col-auto">
+        <select id="an_gdim" class="form-select form-select-sm">
+          <option value="region">Group by Market & Region</option>
+          <option value="category">Group by Category</option>
+        </select>
+      </div>
+    </div>
+    <small class="text-muted d-block mb-2">
+      Anomaly Count is defined as the number of orders where Profit &lt; -100 or Discount &gt; 50%<br>
+      % of Total presents the share of all anomalies in this view<br>
+      Avg Profit is the average profit of only anomalous orders
+    </small>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle">
+        <thead><tr><th>Group</th><th class="w-50">Anomaly Count</th><th>% of Total</th><th>Avg Profit</th></tr></thead>
+        <tbody id="an_body"></tbody>
+      </table>
+    </div>
+  `);
+  $("#an_gdim").off().change(fetch);
+  fetch();
+  function fetch(){
+    const gdim=$("#an_gdim").val();
+    $.ajax({
+      url:`/analytics?type=anomalies&gdim=${gdim}&dp=${dp}`,
+      headers:{Authorization:"Bearer "+token},
+      success:r=>{
+        const rows=r.rows||[];
+        const maxCount=Math.max(1, ...rows.map(x=>x.count||0));
+        const body=rows.map(x=>{
+          const w=Math.round(((x.count||0)/maxCount)*100);
+          return `<tr>
+            <td>${x.g}</td>
+            <td class="barcell"><div class="barbg" style="width:${w}%"></div><div class="bartext">${numberFmt(x.count)}</div></td>
+            <td>${numberFmt(x.pct,"pct")}</td>
+            <td>${numberFmt(x.avg_profit,"money")}</td>
+          </tr>`;
+        }).join("");
+        $("#an_body").html(body);
+      },
+      error:_=>$("#an_body").html("<tr><td colspan='4' class='text-danger'>Failed to load.</td></tr>")
+    });
+  }
+}
+
+function loadLogs(){
+  $("#content").html(`
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>User</th>
+            <th>Role</th>
+            <th>Event</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody id="log_body"></tbody>
+      </table>
+    </div>
+  `);
+
+  $.ajax({
+    url: "/analytics?type=logs",
+    headers:{Authorization:"Bearer "+token},
+    success: r => {
+      const rows = r.rows || [];
+      if (!rows.length){
+        $("#log_body").html("<tr><td colspan='5'>No log records yet.</td></tr>");
+        return;
+      }
+      const body = rows.map(x => {
+        const ts = x.t ? new Date(x.t*1000).toLocaleString() : "";
+        const user = x.u || "";
+        const role = x.r || "";
+        const event = x.e || "";
+        const details = x.x ? JSON.stringify(x.x) : "";
+        return `<tr>
+          <td>${ts}</td>
+          <td>${user}</td>
+          <td>${role}</td>
+          <td>${event}</td>
+          <td><code>${details}</code></td>
+        </tr>`;
+      }).join("");
+      $("#log_body").html(body);
+    },
+    error: _ => {
+      $("#log_body").html("<tr><td colspan='5' class='text-danger'>Failed to load logs.</td></tr>");
+    }
+  });
+}
+
+// helper: show/hide DP box depending on active tab and role
+function updateDpVisibilityForTab(tabKey){
+  if (role === "Security Officer") {
+    $("#dpBox").hide();
+    return;
+  }
+  if (tabKey === "logs") {
+    $("#dpBox").hide(); // no DP toggle on audit log tab
+  } else {
+    $("#dpBox").show();
+  }
+}
+
+$("#btn").click(()=>{
+  $.ajax({
+    url:"/login",
+    method:"POST",
+    contentType:"application/json",
+    data:JSON.stringify({email:$("#email").val(),password:$("#pw").val()}),
+    success:d=>{
+      token=d.token; role=d.role;
+      $("#login").hide(); $("#dash").show();
+
+      const start = d.hours[0];
+      const end = d.hours[1];
+      const now = d.now_str || d.now;
+      const valid = d.time_valid;
+      const duration = d.duration;
+      const validityText = valid ? "Valid" : "INVALID for this role";
+
+      $("#who").text(`${role} | ${$("#email").val()}`);
+      $("#msg")
+        .removeClass("alert-danger")
+        .addClass("alert-info")
+        .text(`${role} | Token Duration ${duration} Seconds | Time ${start}-${end} ${validityText} (Now: ${now})`);
+
+      // DP behaviour per role:
+      if(role==="Data Analyst"){
+        dp=true; $("#dp").prop("checked",true).prop("disabled",true);
+        $("#dpBox").show();
+      } else if (role === "Security Officer") {
+        dp=false;
+        $("#dp").prop("checked",false).prop("disabled",true);
+        $("#dpBox").hide();
+      } else {
+        // Data Manager: optional DP
+        dp=false; $("#dp").prop("checked",false).prop("disabled",false);
+        $("#dpBox").show();
+      }
+
+      // Which tabs each role sees
+      let allowedKeys;
+      if (role === "Security Officer") {
+        allowedKeys = ["logs"];
+      } else if (role === "Data Analyst") {
+        allowedKeys = ["top","trend","anomalies"];
+      } else { // Data Manager
+        allowedKeys = ["top","trend","anomalies","logs"];
+      }
+
+      const roleTabs = Object.entries(tabs)
+        .filter(([k]) => allowedKeys.includes(k))
+        .map(([k,v],i)=>`<li class='nav-item'>
+            <a class='nav-link ${i==0?"active":""}' href='#' id='t${k}'>${v}</a>
+          </li>`).join("");
+      $("#tabs").html(roleTabs);
+
+      $.ajaxSetup({beforeSend:(xhr)=>xhr.setRequestHeader("Authorization","Bearer "+token)});
+
+      $(".nav-link").off().click(function(e){
+        e.preventDefault();
+        $(".nav-link").removeClass("active");
+        $(this).addClass("active");
+        const t=this.id.substring(1);
+        updateDpVisibilityForTab(t);
+        if(t==="top")        loadTop();
+        else if(t==="trend") loadTrend();
+        else if(t==="anomalies") loadAnomalies();
+        else if(t==="logs")  loadLogs();
+      });
+
+      const firstId=$("#tabs a:first").attr("id");
+      if(firstId){
+        const t=firstId.substring(1);
+        updateDpVisibilityForTab(t);
+        if(t==="top")        loadTop();
+        else if(t==="trend") loadTrend();
+        else if(t==="anomalies") loadAnomalies();
+        else if(t==="logs")  loadLogs();
+      }
+    },
+    error:_=>{
+      $("#msg").text("Login failed.").removeClass("alert-info").addClass("alert-danger");
+    }
+  });
+});
+
+$("#dp").change(()=>{ 
+  if(role!=="Data Analyst"){ // Analyst DP fixed; Manager can toggle; Security Officer hidden
+    dp=$("#dp").is(":checked");
+    const a=$(".nav-link.active").attr("id");
+    if(!a)return;
+    const t=a.substring(1);
+    if(t==="top")        loadTop();
+    else if(t==="trend") loadTrend();
+    else if(t==="anomalies") loadAnomalies();
+    // logs: DP box is hidden there, so no effect
+  }
+});
+</script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
